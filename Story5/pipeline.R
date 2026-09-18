@@ -1,0 +1,684 @@
+# Written by AlchemYst-Crucible, the analysis architecture of AlkhemYst-Ai.
+#
+# Not written by hand. Every step below corresponds to a component on the
+# pipeline canvas, and the settings it runs with are the ones set there.
+suppressPackageStartupMessages({
+  library(jsonlite)
+  library(data.table)
+  library(ggplot2)
+})
+
+dir.create("artifacts", showWarnings = FALSE, recursive = TRUE)
+
+# An environment, not a list. R copies a list on assignment, so a helper that
+# appended to one would write into its own copy and the caller would never see
+# it. That is how a run reports success with no metrics at all.
+METRICS <- new.env(parent = emptyenv())
+
+metric <- function(node_id, name, value) {
+  # Every measurement belongs to the step that made it. The key is what lets
+  # the interface show a component's own numbers when it is opened, instead of
+  # one pile for the whole run.
+  assign(paste0(node_id, "::", name), value, envir = METRICS)
+  invisible(value)
+}
+
+.wrap_labels <- function(x, width = 45) {
+  # str_wrap without depending on stringr being attached.
+  vapply(as.character(x), function(s) {
+    if (is.na(s) || nchar(s) <= width) return(s)
+    paste(strwrap(s, width = width), collapse = "\n")
+  }, character(1), USE.NAMES = FALSE)
+}
+
+.fit_categories <- function(plot, height) {
+  # A FIGURE WITH A ROW PER CATEGORY MUST BE SIZED BY THE CATEGORIES.
+  #
+  # THE FAULT. An enrichment barplot draws twenty GO terms in whatever frame it
+  # is given. "positive regulation of endothelial cell migration" is 56
+  # characters, so the label wraps to a second line, the row does not grow to
+  # take it, and consecutive terms print through each other. The figure looks
+  # finished and cannot be read, which is worse than one that failed, because
+  # nothing downstream questions a PNG that exists.
+  #
+  # This lives here, in the scaffolding, because three runs of telling the
+  # coder to size its own figures produced three figures of the same size. A
+  # rule the model may skip is not a control; every figure goes through
+  # save_fig whether the coder thought about it or not.
+  #
+  # Anything that throws leaves the plot exactly as it was: a figure drawn at
+  # the wrong height is a poor figure, and a figure lost to an error in the
+  # code that was trying to improve it is no figure at all.
+  tryCatch({
+    if (!inherits(plot, "ggplot")) return(list(plot = plot, height = height))
+    built <- ggplot2::ggplot_build(plot)
+    params <- built$layout$panel_params[[1]]
+    labels <- NULL
+    if (!is.null(params$y) && !is.null(params$y$get_labels)) {
+      labels <- params$y$get_labels()
+    }
+    labels <- labels[!is.na(labels)]
+    # A discrete axis of words, not a numeric scale that happens to print as
+    # text: every tick has to be non-numeric before anything is changed.
+    if (length(labels) < 3 || !any(is.na(suppressWarnings(as.numeric(labels))))) {
+      return(list(plot = plot, height = height))
+    }
+    longest <- max(nchar(labels))
+    if (longest > 24) {
+      plot <- plot + ggplot2::scale_y_discrete(labels = .wrap_labels)
+      # Wrapping buys legibility at the cost of vertical space, so the rows
+      # have to allow for the extra lines it creates.
+      lines_each <- ceiling(longest / 45)
+      height <- max(height, 0.34 * length(labels) * lines_each + 1.6)
+    } else {
+      height <- max(height, 0.30 * length(labels) + 1.4)
+    }
+    list(plot = plot, height = min(height, 24))   # ggsave refuses past ~50in
+  }, error = function(e) list(plot = plot, height = height))
+}
+
+save_fig <- function(plot, name, width = 7.2, height = 4.8, dpi = 110) {
+  # Takes what survminer and its relatives actually return.
+  #
+  # ggsurvplot() and ggcoxzph() return LISTS, and ggsave() has no method for
+  # them: the run dies in grid.draw after the analysis is finished, with an
+  # error naming neither the plot nor the package. Printing into a device
+  # handles every case and is the only way the risk table and the
+  # per-covariate panels survive.
+  # NOTHING IS NOT A FIGURE.
+  #
+  # A step drew with pheatmap and then handed this function a NULL, under a
+  # comment claiming save_fig handles pheatmap objects. It does not, and
+  # nothing said so: print(NULL) put two bare NULLs in the log, no image was
+  # written, and the step reported done. The canvas showed a heatmap step that
+  # had run and there was no heatmap. A silent absence is worse than a failure,
+  # because a failure gets corrected and this got believed.
+  #
+  # pheatmap draws to the device and returns its object invisibly, so the
+  # figure has to be captured rather than assumed:
+  #     p <- pheatmap::pheatmap(mat, silent = TRUE); save_fig(p, "name")
+  if (is.null(plot)) {
+    stop(sprintf(
+      paste0("save_fig('%s') was given NULL, so there is no figure to save. ",
+             "Capture the plot object and pass it: for pheatmap, ",
+             "p <- pheatmap::pheatmap(mat, silent = TRUE); save_fig(p, '%s')"),
+      name, name))
+  }
+  fitted <- .fit_categories(plot, height)
+  plot <- fitted$plot
+  height <- fitted$height
+  path <- file.path("artifacts", paste0(name, ".png"))
+  ok <- tryCatch({
+    if (inherits(plot, "ggplot")) {
+      ggplot2::ggsave(path, plot = plot, width = width, height = height, dpi = dpi)
+    } else {
+      grDevices::png(path, width = width * dpi, height = height * dpi, res = dpi)
+      print(plot)
+      grDevices::dev.off()
+    }
+    TRUE
+  }, error = function(e) {
+    message(sprintf("could not save figure '%s': %s", name, conditionMessage(e)))
+    FALSE
+  })
+  invisible(ok)
+}
+
+emit_preview <- function(node_id, df, rows = 5) {
+  # The table a step produced, as the interface shows it. A transform that
+  # reports no metric still has to prove it ran, and its preview is that
+  # proof.
+  df <- as.data.frame(df)
+  n <- min(rows, nrow(df))
+  prev <- list(
+    rows = nrow(df),
+    columns = ncol(df),
+    sample_columns = as.list(utils::head(names(df), 500)),
+    sample = if (n > 0) unname(lapply(seq_len(n), function(i) {
+      as.list(lapply(df[i, , drop = FALSE], function(v) {
+        if (is.na(v[1])) NULL else as.character(v[1])
+      }))
+    })) else list()
+  )
+  jsonlite::write_json(prev, file.path("artifacts", paste0(node_id, "__preview.json")),
+                       auto_unbox = TRUE, null = "null")
+  invisible(NULL)
+}
+
+annotation_frame <- function(values, cols) {
+  # The annotation pheatmap actually accepts.
+  #
+  # pheatmap matches annotations to the matrix BY NAME, so the thing it wants
+  # is a data.frame whose row names are the matrix's column names. Neither
+  # obvious wrong answer survives: a named list fails with "incorrect number
+  # of dimensions", because a list indexed in two dimensions is not a thing,
+  # and a data.frame with no row names fails later and less helpfully inside
+  # grid with "'gpar' element 'fill' must not be length 0". Both were
+  # reproduced against the real package before this was written.
+  #
+  # The failure lands after the analysis is finished and the figure is the
+  # last thing the step does, so it costs the whole step rather than the
+  # picture.
+  #
+  # THE COLUMN IS NAMED AFTER THE EXPRESSION THAT PRODUCED IT.
+  #
+  # It used to be named "Group" always. Four annotations built from one sample
+  # table and cbind-ed together were then four columns all called Group, and
+  # pheatmap died on "Factor levels on variable Group do not match with
+  # annotation_colors" -- after edgeR had run, so it cost the heatmap step and
+  # every step downstream of it. deparse(substitute()) needs nothing of the
+  # caller: annotation_frame(samples$condition, ...) names itself "condition".
+  name <- deparse(substitute(values))
+  df <- as.data.frame(values, stringsAsFactors = FALSE)
+  if (ncol(df) == 1 && is.null(names(values))) {
+    name <- sub("^.*\\$", "", name[1])          # samples$condition -> condition
+    name <- sub("^.*\\[\\[\"?", "", name)        # meta[["hours"]]    -> hours"]]
+    name <- gsub("[^A-Za-z0-9_.]", "", name)
+    if (!nzchar(name) || grepl("^[0-9.]", name)) name <- "Group"
+    names(df) <- name
+  }
+  rownames(df) <- cols
+  df
+}
+
+step_start <- function(node_id, i, total, label) {
+  print(sprintf("[[step]] %s start %d/%d ▶ %s", node_id, i, total, label))
+  flush.console()
+}
+
+step_done <- function(node_id, i, total, label) {
+  print(sprintf("[[step]] %s done %d/%d ✓ %s", node_id, i, total, label))
+  flush.console()
+}
+
+# A step that cannot do its work says so and the run continues. A step that
+# stops the program takes every later step with it, including the ones that
+# would have worked, and the researcher loses the whole run over one column.
+step_skipped <- function(node_id, why) {
+  metric(node_id, "skipped", why)
+  message(sprintf("%s: %s", node_id, why))
+  invisible(NULL)
+}
+
+
+# %% [node:n1] Dataset
+step_start("n1", 1, 7, "Dataset")
+DATA_FILE <- "data/lsec_tmt_intensities.csv"
+# One reader chosen by extension, because a csv opened as parquet
+# fails with a message about magic bytes that names neither.
+read_any <- function(path) {
+  ext <- tolower(tools::file_ext(path))
+  if (ext %in% c("csv", "txt")) data.table::fread(path, data.table = FALSE)
+  else if (ext == "tsv") data.table::fread(path, sep = "\t", data.table = FALSE)
+  else if (ext == "json") jsonlite::fromJSON(path)
+  else if (ext %in% c("parquet", "pq")) arrow::read_parquet(path)
+  else data.table::fread(path, data.table = FALSE)
+}
+df <- read_any(DATA_FILE)
+metric("n1", "rows", nrow(df))
+metric("n1", "columns", ncol(df))
+emit_preview("n1", df)
+print(sprintf("loaded %d rows and %d columns from %s", nrow(df), ncol(df), DATA_FILE))
+step_done("n1", 1, 7, "Dataset")
+
+
+# %% [node:n4] edgeR differential expression
+step_start("n4", 2, 7, "edgeR differential expression")
+
+# ---- load design ------------------------------------------------------------
+design_path <- "data/lsec_samples.csv"
+if (!file.exists(design_path)) {
+  step_skipped("n4", "Design file not found")
+  step_done("n4", 2, 7, "edgeR differential expression")
+} else {
+  samples <- read.csv(design_path, stringsAsFactors = FALSE)
+
+  # ---- sanity checks ---------------------------------------------------------
+  req_cols <- c("sample", "condition")
+  miss_req <- setdiff(req_cols, colnames(samples))
+  if (length(miss_req) > 0) {
+    step_skipped("n4", paste("Design missing columns:", paste(miss_req, collapse = ", ")))
+    step_done("n4", 2, 7, "edgeR differential expression")
+  } else {
+    # ---- check gene column in intensity matrix --------------------------------
+    if (!"gene" %in% colnames(df)) {
+      step_skipped("n4", "'gene' column missing in intensity matrix")
+      step_done("n4", 2, 7, "edgeR differential expression")
+    } else {
+      # ---- match samples -------------------------------------------------------
+      sample_cols   <- setdiff(colnames(df), "gene")
+      matched_names <- intersect(samples$sample, sample_cols)
+
+      if (length(matched_names) == 0) {
+        step_skipped("n4", "No matching sample columns between design and intensity matrix")
+        step_done("n4", 2, 7, "edgeR differential expression")
+      } else {
+        # keep only matched rows and order as in the intensity matrix
+        samples_matched <- samples[samples$sample %in% matched_names, ]
+        samples_matched <- samples_matched[match(matched_names, samples_matched$sample), ]
+
+        # ---- build count matrix ------------------------------------------------
+        counts_mat <- as.matrix(df[, samples_matched$sample, drop = FALSE])
+        rownames(counts_mat) <- df$gene
+
+        # collapse duplicated gene identifiers (edgeR requires unique rownames)
+        if (any(duplicated(rownames(counts_mat)))) {
+          uniq_counts <- rowsum(counts_mat,
+                                group = make.unique(rownames(counts_mat)))
+          counts_mat <- uniq_counts
+        }
+
+        # ---- edgeR pipeline ----------------------------------------------------
+        library(edgeR)   ## attached locally for this step only
+
+        y <- DGEList(counts = counts_mat)
+
+        # filter low-count features (min_count from settings)
+        min_cnt <- 10
+        keep <- filterByExpr(y, min.count = min_cnt)
+        if (sum(!keep) == nrow(y)) {
+          step_skipped("n4", "All features filtered out by min_count")
+          step_done("n4", 2, 7, "edgeR differential expression")
+        } else {
+          y <- y[keep, , keep.lib.sizes = FALSE]
+
+          # TMM normalization
+          y <- calcNormFactors(y, method = "TMM")
+
+                      # design factor
+            cond_factor <- factor(samples_matched$condition)
+            # estimate dispersion using the condition factor
+            design_mat <- model.matrix(~cond_factor)
+            y <- estimateDisp(y, design = design_mat)
+            ref_level   <- "NT_48h"
+            if (!ref_level %in% levels(cond_factor)) {
+            step_skipped("n4", paste("Reference level", ref_level, "not present in condition factor"))
+            step_done("n4", 2, 7, "edgeR differential expression")
+          } else {
+            cond_factor <- relevel(cond_factor, ref = ref_level)
+
+            # edgeR exactTest expects a group vector
+            y$samples$group <- cond_factor
+
+            # exact test for Dex_48h vs NT_48h
+            if (!all(c("Dex_48h", "NT_48h") %in% levels(cond_factor))) {
+              step_skipped("n4", "Required groups (Dex_48h, NT_48h) missing")
+              step_done("n4", 2, 7, "edgeR differential expression")
+            } else {
+              et <- exactTest(y, pair = c("NT_48h", "Dex_48h"))
+
+              # full results table
+              res_tbl <- topTags(et, n = Inf, adjust.method = "BH", sort.by = "PValue")$table
+              res_tbl$gene <- rownames(res_tbl)
+
+              # make a copy for downstream merge step
+              n4_res <- res_tbl
+
+              # ---- preview -------------------------------------------------------
+              emit_preview("n4", head(res_tbl, 20))
+
+              # ---- metrics --------------------------------------------------------
+              alpha <- 0.05
+              de_genes <- sum(res_tbl$FDR < alpha, na.rm = TRUE)
+              metric("n4_de_genes", "DE genes (FDR < 0.05)", de_genes)
+
+              # ---- volcano plot (evidence) ---------------------------------------
+              library(ggplot2)
+              volcano <- ggplot(res_tbl,
+                                aes(x = logFC, y = -log10(PValue))) +
+                geom_point(alpha = 0.4, colour = "steelblue") +
+                geom_vline(xintercept = c(-1, 1), linetype = "dashed", colour = "darkred") +
+                geom_hline(yintercept = -log10(alpha), linetype = "dashed", colour = "darkred") +
+                labs(title = "edgeR exactTest: Dex_48h vs NT_48h",
+                     x = "log2 Fold Change",
+                     y = "-log10 P-value") +
+                theme_minimal()
+              save_fig(volcano, "n4__volcano")
+
+              step_done("n4", 2, 7, "edgeR differential expression")
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+# %% [node:n5] Volcano Plot
+step_start("n5", 3, 7, "Volcano Plot")
+
+# ---- check that differential expression results exist -------------------------
+if (!exists("res_tbl") || nrow(res_tbl) == 0) {
+  step_skipped("n5", "Differential expression results (res_tbl) not available")
+  step_done("n5", 3, 7, "Volcano Plot")
+} else {
+  # ---- settings ---------------------------------------------------------------
+  lfc_thr   <- 1          # from node settings
+  alpha_thr <- 0.05       # from node settings
+  label_n   <- 20         # top genes to label
+
+  # ---- prepare data ------------------------------------------------------------
+  res_tbl$gene <- as.character(res_tbl$gene)
+
+  # select top genes by smallest FDR (or by absolute logFC if ties)
+  top_genes <- head(res_tbl[order(res_tbl$FDR, -abs(res_tbl$logFC)), "gene"], label_n)
+
+  # ---- volcano plot -----------------------------------------------------------
+  library(ggplot2)
+  library(ggrepel)
+
+  volcano_plot <- ggplot(res_tbl,
+                         aes(x = logFC, y = -log10(PValue))) +
+    geom_point(alpha = 0.5, colour = "steelblue") +
+    geom_vline(xintercept = c(-lfc_thr, lfc_thr), linetype = "dashed", colour = "darkred") +
+    geom_hline(yintercept = -log10(alpha_thr), linetype = "dashed", colour = "darkred") +
+    geom_text_repel(data = subset(res_tbl, gene %in% top_genes),
+                    aes(label = gene),
+                    size = 3,
+                    box.padding = 0.3,
+                    point.padding = 0.2,
+                    max.overlaps = Inf) +
+    labs(title = "Volcano plot: Dex_48h vs NT_48h",
+         x = "log2 Fold Change",
+         y = "-log10 P-value") +
+    theme_minimal()
+
+  save_fig(volcano_plot, "n5__volcano")
+
+  # ---- optional metric (number of DE genes) ------------------------------------
+  de_cnt <- sum(res_tbl$FDR < alpha_thr, na.rm = TRUE)
+  metric("n5_de_genes", "DE genes (FDR < 0.05) - volcano step", de_cnt)
+
+  step_done("n5", 3, 7, "Volcano Plot")
+}
+
+# %% [node:n6] Expression Heatmap
+step_start("n6", 4, 7, "Expression Heatmap")
+
+# ---- load design (samples) ----------------------------------------------------
+design_path <- "data/lsec_samples.csv"
+if (!file.exists(design_path)) {
+  step_skipped("n6", "Design file not found")
+  step_done("n6", 4, 7, "Expression Heatmap")
+} else {
+  samples <- read.csv(design_path, stringsAsFactors = FALSE)
+
+  # sanity check for required columns
+  req_cols <- c("sample", "condition")
+  miss_req <- setdiff(req_cols, colnames(samples))
+  if (length(miss_req) > 0) {
+    step_skipped("n6", paste("Design missing columns:", paste(miss_req, collapse = ", ")))
+    step_done("n6", 4, 7, "Expression Heatmap")
+  } else {
+    # ---- match sample columns -------------------------------------------------
+    sample_cols   <- setdiff(colnames(df), "gene")
+    matched_names <- intersect(samples$sample, sample_cols)
+
+    if (length(matched_names) == 0) {
+      step_skipped("n6", "No matching sample columns between design and intensity matrix")
+      step_done("n6", 4, 7, "Expression Heatmap")
+    } else {
+      samples_matched <- samples[samples$sample %in% matched_names, ]
+      samples_matched <- samples_matched[match(matched_names, samples_matched$sample), ]
+
+      # ---- build count matrix -------------------------------------------------
+      counts_mat <- as.matrix(df[, samples_matched$sample, drop = FALSE])
+      rownames(counts_mat) <- df$gene
+
+      # collapse duplicated gene identifiers (edgeR requirement)
+      if (any(duplicated(rownames(counts_mat)))) {
+        uniq_counts <- rowsum(counts_mat,
+                              group = make.unique(rownames(counts_mat)))
+        counts_mat <- uniq_counts
+      }
+
+      # ---- ensure DE results are present --------------------------------------
+      if (!exists("res_tbl") || nrow(res_tbl) == 0) {
+        step_skipped("n6", "Differential expression results (res_tbl) not available")
+        step_done("n6", 4, 7, "Expression Heatmap")
+      } else {
+        # ---- select top N DE genes -------------------------------------------
+        top_n <- 50   # from node settings
+        top_genes <- head(res_tbl[order(res_tbl$FDR, -abs(res_tbl$logFC)), "gene"], top_n)
+
+        # keep only those rows (handle possible missing after collapsing)
+        keep_idx <- which(rownames(counts_mat) %in% top_genes)
+        if (length(keep_idx) == 0) {
+          step_skipped("n6", "No top genes found in expression matrix")
+          step_done("n6", 4, 7, "Expression Heatmap")
+        } else {
+          expr_sub <- counts_mat[keep_idx, , drop = FALSE]
+
+          # ---- transform to log2-CPM ------------------------------------------------
+          library(edgeR)   # for cpm()
+          cpm_mat <- cpm(expr_sub, log = TRUE, prior.count = 1)
+
+          # optional scaling of rows
+          if (TRUE) {   # scale_rows from settings
+            row_means <- rowMeans(cpm_mat, na.rm = TRUE)
+            row_sds   <- apply(cpm_mat, 1, sd, na.rm = TRUE)
+            cpm_mat   <- sweep(cpm_mat, 1, row_means, "-")
+            cpm_mat   <- sweep(cpm_mat, 1, row_sds, "/")
+          }
+
+          # ---- column annotation -------------------------------------------------
+          ann_col <- annotation_frame(samples_matched$condition,
+                                      colnames(cpm_mat))
+
+          # ---- draw heatmap ------------------------------------------------------
+          library(pheatmap)
+          heatmap_obj <- pheatmap(cpm_mat,
+                                  annotation_col = ann_col,
+                                  show_rownames = nrow(cpm_mat) <= 60, fontsize_row = max(4, min(9, 420 / max(1, nrow(cpm_mat)))),
+                                  show_colnames = TRUE,
+                                  fontsize_col = 8,
+                                  main = "Top DE genes heatmap (log2-CPM)")
+
+          # pheatmap returns a list; the plot is drawn automatically.
+          # Save the figure (the object returned by pheatmap is compatible with save_fig)
+          save_fig(heatmap_obj, "n6__heatmap")
+
+          # ---- optional preview of the matrix (first few rows) -------------------
+          emit_preview("n6", head(cpm_mat, 10))
+
+          step_done("n6", 4, 7, "Expression Heatmap")
+        }
+      }
+    }
+  }
+}
+
+# %% [node:n9] Enrichment Analysis
+step_start("n9", 5, 7, "Enrichment Analysis")
+
+# ---- check for DE results ----------------------------------------------------
+if (!exists("res_tbl") || nrow(res_tbl) == 0) {
+  step_skipped("n9", "Differential expression results (res_tbl) not available")
+  step_done("n9", 5, 7, "Enrichment Analysis")
+} else if (!"gene" %in% colnames(res_tbl)) {
+  # ---- ensure gene column exists ---------------------------------------------
+  step_skipped("n9", "'gene' column missing in differential expression results")
+  step_done("n9", 5, 7, "Enrichment Analysis")
+} else {
+  # ---- settings ---------------------------------------------------------------
+  alpha   <- 0.05          # from node settings
+  min_gs  <- 10            # minimum gene set size
+  ont     <- "BP"          # GO Biological Process
+  organism <- "org.Mm.eg.db"   # mouse annotation package
+
+  # ---- prepare gene list -------------------------------------------------------
+  sig_genes <- res_tbl$gene[res_tbl$FDR < alpha]
+  if (length(sig_genes) == 0) {
+    step_skipped("n9", "No significant genes (FDR < 0.05) for enrichment")
+    step_done("n9", 5, 7, "Enrichment Analysis")
+  } else {
+    # ---- load required packages ------------------------------------------------
+    suppressPackageStartupMessages({
+      library(clusterProfiler)
+      library(org.Mm.eg.db)
+      library(enrichplot)
+      library(ggplot2)
+    })
+
+    # ---- run over-representation analysis ---------------------------------------
+    ego <- enrichGO(gene          = sig_genes,
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = "SYMBOL",
+                    ont           = ont,
+                    pAdjustMethod = "BH",
+                    pvalueCutoff  = alpha,
+                    qvalueCutoff  = alpha,
+                    minGSSize     = min_gs,
+                    readable      = TRUE)
+
+    if (is.null(ego) || nrow(ego) == 0) {
+      step_skipped("n9", "Enrichment returned no terms")
+      step_done("n9", 5, 7, "Enrichment Analysis")
+    } else {
+      # ---- preview top enriched terms -----------------------------------------
+      emit_preview("n9", head(ego@result, 10))
+
+      # ---- barplot of top terms ------------------------------------------------
+      barplot_obj <- barplot(ego, showCategory = 20, title = "GO BP enrichment")
+      save_fig(barplot_obj, "n9__enrichment_bar")
+
+      # ---- dotplot as additional evidence --------------------------------------
+      dotplot_obj <- dotplot(ego, showCategory = 20, title = "GO BP enrichment")
+      save_fig(dotplot_obj, "n9__enrichment_dot")
+
+      # ---- metric: number of enriched terms ------------------------------------
+      metric("n9_enriched_terms", "Enriched GO BP terms (FDR < 0.05)", nrow(ego))
+
+      step_done("n9", 5, 7, "Enrichment Analysis")
+    }
+  }
+}
+
+# %% [node:n7] Merge
+step_start("n7", 6, 7, "Merge")
+
+# ---- load published reference ------------------------------------------------
+pub_path <- "data/lsec_published_dex48_vs_nt48.csv"
+if (!file.exists(pub_path)) {
+  step_skipped("n7", "Published reference file not found")
+  step_done("n7", 6, 7, "Merge")
+} else {
+  pub_ref <- read.csv(pub_path, stringsAsFactors = FALSE)
+
+  # ---- sanity checks on reference -------------------------------------------
+  req_pub_cols <- c("gene", "published_log2FC", "published_pvalue", "published_fdr")
+  miss_pub <- setdiff(req_pub_cols, colnames(pub_ref))
+  if (length(miss_pub) > 0) {
+    step_skipped("n7", paste("Reference missing columns:", paste(miss_pub, collapse = ", ")))
+    step_done("n7", 6, 7, "Merge")
+  } else {
+    # ---- obtain upstream edgeR results ---------------------------------------
+    if (!exists("n4_res")) {
+      step_skipped("n7", "Up-stream edgeR results (n4_res) not available")
+      step_done("n7", 6, 7, "Merge")
+    } else {
+      edge_res <- n4_res
+
+      # ---- sanity checks on edgeR results ------------------------------------
+      req_edge_cols <- c("gene", "logFC", "PValue", "FDR")
+      miss_edge <- setdiff(req_edge_cols, colnames(edge_res))
+      if (length(miss_edge) > 0) {
+        step_skipped("n7", paste("edgeR results missing columns:", paste(miss_edge, collapse = ", ")))
+        step_done("n7", 6, 7, "Merge")
+      } else {
+        # ---- inner join on gene (1:1 validation) -----------------------------
+        merged_tbl <- merge(edge_res, pub_ref,
+                            by = "gene",
+                            all = FALSE,
+                            sort = FALSE)
+
+        # ---- validate 1:1 relationship ---------------------------------------
+        dup_gene <- any(duplicated(merged_tbl$gene))
+        if (dup_gene) {
+          step_skipped("n7", "Duplicate gene identifiers after merge (violates 1:1 validation)")
+          step_done("n7", 6, 7, "Merge")
+        } else {
+          # ---- store for downstream step --------------------------------------
+          n7_merged <- merged_tbl   # make available to n8
+
+          # ---- preview ---------------------------------------------------------
+          emit_preview("n7", head(merged_tbl, 20))
+
+          # ---- metrics ---------------------------------------------------------
+          metric("n7_merged_genes", "Genes successfully merged with reference", nrow(merged_tbl))
+
+          step_done("n7", 6, 7, "Merge")
+        }
+      }
+    }
+  }
+}
+
+# %% [node:n8] Correlation Test
+step_start("n8", 7, 7, "Correlation Test")
+
+# ---- ensure merged data is present -------------------------------------------
+if (!exists("n7_merged")) {
+  step_skipped("n8", "Merged table from n7 not found")
+  step_done("n8", 7, 7, "Correlation Test")
+} else {
+  corr_df <- n7_merged
+
+  # ---- column existence check -------------------------------------------------
+  col_a <- "logFC"
+  col_b <- "published_log2FC"
+  missing_cols <- setdiff(c(col_a, col_b), colnames(corr_df))
+  if (length(missing_cols) > 0) {
+    step_skipped("n8", paste("Missing columns for correlation:", paste(missing_cols, collapse = ", ")))
+    step_done("n8", 7, 7, "Correlation Test")
+  } else {
+    # ---- compute Pearson correlation -----------------------------------------
+    cor_res <- tryCatch(
+      cor.test(corr_df[[col_a]], corr_df[[col_b]], method = "pearson"),
+      error = function(e) NULL
+    )
+
+    if (is.null(cor_res)) {
+      step_skipped("n8", "Correlation test failed")
+      step_done("n8", 7, 7, "Correlation Test")
+    } else {
+      # ---- record metrics ------------------------------------------------------
+      metric("n8_pearson_r", "Pearson r (logFC vs published_log2FC)", cor_res$estimate)
+      metric("n8_pearson_p", "Pearson p-value (logFC vs published_log2FC)", cor_res$p.value)
+
+      # ---- scatter plot with regression line ----------------------------------
+      library(ggplot2)
+      scatter_plot <- ggplot(corr_df, aes_string(x = col_a, y = col_b)) +
+        geom_point(alpha = 0.6, colour = "steelblue") +
+        geom_smooth(method = "lm", se = FALSE, colour = "darkred") +
+        labs(
+          title = "Correlation of edgeR logFC with published logFC",
+          subtitle = paste0(
+            "r = ", round(cor_res$estimate, 3),
+            ", p = ", signif(cor_res$p.value, 3)
+          ),
+          x = "edgeR log2 Fold Change",
+          y = "Published log2 Fold Change"
+        ) +
+        theme_minimal()
+
+      save_fig(scatter_plot, "n8__corr_scatter")
+
+      step_done("n8", 7, 7, "Correlation Test")
+    }
+  }
+}
+
+# %% Finalize
+local({
+  out <- as.list(METRICS)
+  if (length(out) == 0) {
+    # Said plainly rather than written as an empty object. A run that measured
+    # nothing is nearly always a run where the steps wrote somewhere else, and
+    # an empty metrics.json looks identical to a pipeline that had nothing to
+    # measure.
+    message("no metrics were recorded by any step")
+  }
+  jsonlite::write_json(out, "artifacts/metrics.json", auto_unbox = TRUE, null = "null")
+})
+print("pipeline finished")
