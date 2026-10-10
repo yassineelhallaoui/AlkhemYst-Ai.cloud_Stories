@@ -1,0 +1,49 @@
+[1] "[[step]] n0 start 1/12 \342\226\266 Dataset"
+[1] "archive data/bradley2016_18S_V4.zip: 126 read files, sample table samples.csv (63 rows)"
+[1] "[[step]] n0 done 1/12 \342\234\223 Dataset"
+[1] "[[step]] n1 start 1/3 \342\226\266 Read Quality Report"
+[1] "[[step]] n1 done 1/3 \342\234\223 Read Quality Report"
+[1] "[[step]] n2 start 2/3 \342\226\266 Primer Trimming (Cutadapt)"
+[1] "[[step]] n2 done 2/3 \342\234\223 Primer Trimming (Cutadapt)"
+[1] "[[step]] n3 start 3/3 \342\226\266 Filter & Trim Reads"
+[1] "[[step]] n3 done 3/3 \342\234\223 Filter & Trim Reads"
+[1] "[[step]] n4 start 4/5 \342\226\266 ASV Inference (DADA2)"
+100303600 total bases in 501518 reads from 16 samples will be used for learning the error rates.
+100385760 total bases in 418274 reads from 13 samples will be used for learning the error rates.
+[1] "[[step]] n4 done 4/5 \342\234\223 ASV Inference (DADA2)"
+[1] "[[step]] n15 start 5/5 \342\226\266 Mock Community Check"
+[1] "[[step]] n15 done 5/5 \342\234\223 Mock Community Check"
+[1] "[[step]] n5 start 5/6 \342\226\266 Taxonomy Assignment"
+[1] "[[step]] n5 done 5/6 \342\234\223 Taxonomy Assignment"
+[1] "[[step]] n6 start 6/6 \342\226\266 Phylogenetic Tree"
+[1] "[[step]] n6 done 6/6 \342\234\223 Phylogenetic Tree"
+[1] "[[step]] n7 start 9/12 \342\226\266 BIOM Export"
+[1] "[[step]] n7 done 9/12 \342\234\223 BIOM Export"
+[1] "[[step]] n9 start 10/12 \342\226\266 Taxonomy Composition"
+[1] "[[step]] n9 done 10/12 \342\234\223 Taxonomy Composition"
+[1] "[[step]] n10 start 11/12 \342\226\266 Alpha Diversity"
+[1] "[[step]] n10 done 11/12 \342\234\223 Alpha Diversity"
+[1] "[[step]] n11 start 12/12 \342\226\266 Beta Diversity"
+[1] "[[step]] n11 done 12/12 \342\234\223 Beta Diversity"
+[1] "pipeline finished"
+
+--- stderr ---
+n2: the primer was found in 0.2% of reads; the reads look already trimmed, so the original reads are used
+Warning messages:
+1: In scale_y_log10() : log-10 transformation introduced infinite values.
+2: In scale_y_log10() : log-10 transformation introduced infinite values.
+3: In scale_y_log10() : log-10 transformation introduced infinite values.
+4: In scale_y_log10() : log-10 transformation introduced infinite values.
+Found more than one class "phylo" in cache; using the first, from namespace 'phyloseq'
+Also defined by 'tidytree'
+Found more than one class "phylo" in cache; using the first, from namespace 'phyloseq'
+Also defined by 'tidytree'
+Found more than one class "phylo" in cache; using the first, from namespace 'phyloseq'
+Also defined by 'tidytree'
+Found more than one class "phylo" in cache; using the first, from namespace 'phyloseq'
+Also defined by 'tidytree'
+Found more than one class "phylo" in cache; using the first, from namespace 'phyloseq'
+Also defined by 'tidytree'
+Warning messages:
+1: In MASS::cov.trob(data[, vars]) : Probable convergence failure
+2: In MASS::cov.trob(data[, vars]) : Probable convergence failure
