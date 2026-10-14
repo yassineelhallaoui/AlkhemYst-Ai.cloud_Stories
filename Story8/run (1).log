@@ -1,0 +1,40 @@
+[1] "[[step]] n0 start 1/10 \342\226\266 Dataset"
+[1] "archive data/bakker2018_ITS_AL2.zip: 60 read files, sample table samples.csv (30 rows)"
+[1] "[[step]] n0 done 1/10 \342\234\223 Dataset"
+[1] "[[step]] n1 start 1/4 \342\226\266 Read Quality Report"
+[1] "[[step]] n1 done 1/4 \342\234\223 Read Quality Report"
+[1] "[[step]] n2 start 2/4 \342\226\266 Primer Trimming (Cutadapt)"
+[1] "[[step]] n2 done 2/4 \342\234\223 Primer Trimming (Cutadapt)"
+[1] "[[step]] n3 start 3/4 \342\226\266 Filter & Trim Reads"
+[1] "[[step]] n3 done 3/4 \342\234\223 Filter & Trim Reads"
+[1] "[[step]] n4 start 4/4 \342\226\266 ASV Inference (DADA2)"
+106204476 total bases in 470251 reads from 12 samples will be used for learning the error rates.
+107233646 total bases in 470251 reads from 12 samples will be used for learning the error rates.
+[1] "[[step]] n4 done 4/4 \342\234\223 ASV Inference (DADA2)"
+[1] "[[step]] n5 start 1/2 \342\226\266 Taxonomy Assignment"
+[1] "[[step]] n5 done 1/2 \342\234\223 Taxonomy Assignment"
+[1] "[[step]] n9 start 2/2 \342\226\266 Taxonomy Composition"
+[1] "[[step]] n9 done 2/2 \342\234\223 Taxonomy Composition"
+[1] "[[step]] n15 start 5/7 \342\226\266 Mock Community Check"
+[1] "[[step]] n15 done 5/7 \342\234\223 Mock Community Check"
+[1] "[[step]] n10 start 6/7 \342\226\266 Alpha Diversity"
+[1] "[[step]] n10 done 6/7 \342\234\223 Alpha Diversity"
+[1] "[[step]] n11 start 7/7 \342\226\266 Beta Diversity"
+[1] "[[step]] n11 done 7/7 \342\234\223 Beta Diversity"
+[1] "pipeline finished"
+
+--- stderr ---
+Loading required package: permute
+Warning messages:
+1: In scale_y_log10() : log-10 transformation introduced infinite values.
+2: In scale_y_log10() : log-10 transformation introduced infinite values.
+3: In scale_y_log10() : log-10 transformation introduced infinite values.
+4: In scale_y_log10() : log-10 transformation introduced infinite values.
+Warning message:
+In phyloseq::estimate_richness(x, measures = c("Observed", "Chao1",  :
+  The data you have provided does not have
+any singletons. This is highly suspicious. Results of richness
+estimates (for example) are probably unreliable, or wrong, if you have already
+trimmed low-abundance taxa from the data.
+
+We recommended that you find the un-trimmed data and retry.
